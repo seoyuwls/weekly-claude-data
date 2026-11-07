@@ -19,7 +19,7 @@ const OUT = process.env.OUT ?? 'public/videos.json';
 const PRIOR_URL = process.env.PRIOR_URL ?? 'https://seoyuwls.github.io/weekly-claude-data/videos.json';
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 const MIN_SEC = 180; // 3분 이하(쇼츠 포함) 제외. 쇼츠 판별 방식은 확인 필요
-const CATEGORIES = ['활용', '디자인', '개발', '소식'];
+const CATEGORIES = ['활용', '디자인', '개발'];
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function yt(path, params) {
@@ -45,10 +45,10 @@ const SCHEMA = {
 };
 
 const RULES = `너는 클로드(Anthropic Claude)를 배우는 사람을 위한 강의 영상 분류기야. 아래 기준으로 JSON만 답해.
-- relevant: 클로드(채팅·프로젝트·코워크·스킬·커넥터·클로드 코드·클로드 디자인 등)를 쓰는 법이 영상의 중심이면 true. 다른 AI 도구가 주제이고 클로드는 잠깐 언급되거나 광고·링크로만 나오면 false.
-- category: 활용(채팅·프로젝트·코워크·스킬·커넥터로 업무 처리, 코딩 없음) / 디자인(클로드 디자인, 피그마 연동, UI·디자인 시스템) / 개발(클로드 코드, 바이브 코딩, MCP·API, 앱·웹 만들기) / 소식(업데이트·신기능 정리).
-- beginner: 설치·가입·기본 화면부터 설명하고 사전 지식 없이 따라 할 수 있으면 true. 제목·설명에 처음, 기초, 입문, 왕초보, 따라하기가 있으면 참고.
-- summary: 40자 이내 해요체 한 문장. 이 영상을 보면 무엇을 할 수 있는지 중심. 과장 표현(완벽, 끝판왕, 미친 등)과 제목의 자극적 표현은 옮기지 마. 예: 클로드 코드를 설치하고 첫 웹페이지를 만들어요`;
+- relevant: 영상의 제목이나 핵심 내용이 클로드(채팅·프로젝트·코워크·스킬·커넥터·클로드 코드·클로드 디자인 등)를 쓰는 방법과 기능을 직접 다룰 때만 true. 책·강의 홍보, 일반적인 AI 시사·트렌드 모음, 다른 AI 도구 비교가 중심이거나 클로드가 잠깐 언급되거나 광고·링크로만 나오면 false.
+- category: 활용(채팅·프로젝트·코워크·스킬·커넥터로 업무 처리, 코딩 없음) / 디자인(클로드 디자인, 피그마 연동, UI·디자인 시스템) / 개발(클로드 코드, 바이브 코딩, MCP·API, 앱·웹 만들기). 업데이트·신기능 소개 영상은 다루는 내용에 가장 가까운 분야로 분류해.
+- beginner: 설치·가입·기본 화면부터 설명하고 사전 지식 없이 따라 할 수 있을 때만 true. 서버·터미널 설정, 도구 비교, 심화 개념, 자동화 구축은 false. 제목·설명에 처음, 기초, 입문, 왕초보, 따라하기가 있으면 참고만 하고 내용으로 판단해.
+- summary: 35자 이내 해요체 한 문장, 마침표 없이. 이 영상을 보면 무엇을 할 수 있는지 중심. 과장 표현(완벽, 끝판왕, 미친 등)과 제목의 자극적 표현은 옮기지 마. 예: 클로드 코드를 설치하고 첫 웹페이지를 만들어요`;
 
 async function gemini(parts, attempt = 0) {
   const res = await fetch(`${GM}/models/${MODEL}:generateContent`, {
@@ -59,8 +59,9 @@ async function gemini(parts, attempt = 0) {
       generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.2 },
     }),
   });
-  if (res.status === 429 && attempt < 2) {
-    await sleep(15000 * (attempt + 1));
+  // 한도 초과(429)나 일시적 서버 오류(500·503)는 간격을 늘려 다시 시도한다.
+  if ([429, 500, 503].includes(res.status) && attempt < 3) {
+    await sleep(10000 * 2 ** attempt);
     return gemini(parts, attempt + 1);
   }
   if (!res.ok) {
@@ -111,6 +112,7 @@ const checkedSet = new Set(prior.checked);
 const since = Date.now() - WEEK_MS;
 
 // 1~2) 후보 수집
+console.log(`채널 ${channels.length}곳 조회 시작`);
 const candidates = [];
 const seenIds = new Set();
 let channelFailures = 0;
@@ -150,13 +152,17 @@ if (channelFailures === channels.length) {
   process.exit(1);
 }
 
+console.log(`후보 ${candidates.length}개 분류 시작 (모델 ${MODEL})`);
 // 3) 분류·요약 (이미 한 영상은 재사용)
+let n = 0;
 const videos = [];
 const checked = new Set();
 let aiCalls = 0;
 let pending = 0;
 for (const v of candidates) {
   const { description, ...base } = v;
+  n += 1;
+  console.log(`[${n}/${candidates.length}] ${v.channelName} — ${v.title.slice(0, 40)}`);
   if (checkedSet.has(v.id)) { checked.add(v.id); continue; }
   let result = priorById.get(v.id);
   if (!result) {
@@ -174,14 +180,15 @@ for (const v of candidates) {
   }
   videos.push({
     ...base,
-    category: result.category,
+    category: CATEGORIES.includes(result.category) ? result.category : '활용',
     beginner: result.beginner,
-    summary: result.summary,
+    summary: result.summary.trim().replace(/[.。]+$/, ''),
     summarySource: result.summarySource ?? 'video',
   });
 }
 
-// 4) 수동 수정 반영
+// 4) 수동 수정 반영 (숨긴 영상은 다음 실행에서 다시 분석하지 않도록 기록)
+for (const v of videos) if (overrides[v.id]?.hide) checked.add(v.id);
 const final = videos
   .filter((v) => !overrides[v.id]?.hide)
   .map((v) => {
