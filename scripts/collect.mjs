@@ -104,6 +104,19 @@ async function loadPrior() {
   }
 }
 
+// 유튜브 인기 댓글(관련도순) 최대 3개. 댓글을 막아 둔 영상은 오류가 나므로 빈 목록으로 둔다.
+async function topComments(id) {
+  try {
+    const r = await yt('commentThreads', { part: 'snippet', videoId: id, order: 'relevance', maxResults: '3', textFormat: 'plainText' });
+    return (r.items ?? []).slice(0, 3).map((i) => {
+      const c = i.snippet.topLevelComment.snippet;
+      return { author: c.authorDisplayName, text: String(c.textDisplay).replace(/[ \t]+/g, ' ').trim().slice(0, 220), likeCount: c.likeCount ?? 0 };
+    });
+  } catch {
+    return [];
+  }
+}
+
 const channels = JSON.parse(await readFile('channels.json', 'utf8'));
 const overrides = JSON.parse(await readFile('overrides.json', 'utf8'));
 const prior = await loadPrior();
@@ -198,6 +211,9 @@ const final = videos
     return { ...v, ...rest };
   })
   .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
+
+// 댓글은 시간이 지나면 바뀌므로 이전 결과를 재사용하지 않고 매번 새로 받는다.
+for (const v of final) v.comments = await topComments(v.id);
 
 const counts = {};
 for (const v of final) counts[v.category] = (counts[v.category] ?? 0) + 1;
