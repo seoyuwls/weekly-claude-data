@@ -2,7 +2,7 @@ name: 이번 주 클로드 강의 수집
 
 on:
   schedule:
-    - cron: '0 21 * * *' # 매일 06:00 (한국 시간)
+    - cron: '0 0 * * 1' # 매주 월요일 09:00 (한국 시간)
   workflow_dispatch:
 
 permissions:
