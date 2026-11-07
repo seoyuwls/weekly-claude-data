@@ -1,0 +1,14 @@
+{
+  "updatedAt": "2026-11-07T00:00:00+09:00",
+  "videos": [
+    {
+      "id": "jNQXAC9IVRw",
+      "title": "[외부 JSON] 재생 확인 영상",
+      "channelName": "테스트 채널",
+      "channelHandle": "@test",
+      "publishedAt": "2026-11-05T10:00:00+09:00",
+      "durationSec": 19,
+      "thumbnail": "https://i.ytimg.com/vi/jNQXAC9IVRw/mqdefault.jpg"
+    }
+  ]
+}
