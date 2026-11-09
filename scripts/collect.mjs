@@ -140,15 +140,41 @@ async function makeIssues(videos) {
 async function loadPrior() {
   try {
     const res = await fetch(PRIOR_URL);
-    if (!res.ok) return { videos: [], checked: [], issues: [] };
+    if (!res.ok) return { videos: [], checked: [], issues: [], channels: [] };
     const j = await res.json();
-    return { videos: j.videos ?? [], checked: j.checked ?? [], issues: j.issues ?? [] };
+    return { videos: j.videos ?? [], checked: j.checked ?? [], issues: j.issues ?? [], channels: j.channels ?? [] };
   } catch {
-    return { videos: [], checked: [], issues: [] };
+    return { videos: [], checked: [], issues: [], channels: [] };
+  }
+}
+
+// 채널 소개의 첫 줄만 쓴다(링크·빈 줄 제외). 앱에서 한 줄로 줄여 보여 준다.
+function firstLine(text) {
+  const line = String(text ?? '')
+    .split(/\r?\n/)
+    .map((l) => l.replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim())
+    .find((l) => l.length >= 6); // 너무 짧은 줄('광고' 같은)은 소개로 보지 않는다
+  return (line ?? '').slice(0, 80);
+}
+
+// 유튜브 인기 댓글(관련도순) 최대 3개. 작성자 이름은 저장하지 않는다. 링크가 들어간 댓글, 너무 짧은 댓글은 뺀다.
+// 댓글을 막아 둔 영상은 오류가 나므로 빈 목록으로 둔다. 댓글은 시간이 지나면 바뀌므로 매번 새로 받는다(유튜브 정책: 저장한 API 데이터는 주기적으로 갱신).
+async function topComments(id) {
+  try {
+    const r = await yt('commentThreads', { part: 'snippet', videoId: id, order: 'relevance', maxResults: '10', textFormat: 'plainText' });
+    return (r.items ?? [])
+      .map((i) => i.snippet?.topLevelComment?.snippet)
+      .filter(Boolean)
+      .map((c) => ({ text: String(c.textDisplay ?? '').replace(/\s+/g, ' ').trim().slice(0, 200), likeCount: c.likeCount ?? 0 }))
+      .filter((c) => c.text.length >= 5 && !/https?:\/\/|www\./i.test(c.text))
+      .slice(0, 3);
+  } catch {
+    return [];
   }
 }
 
 const channels = JSON.parse(await readFile('channels.json', 'utf8'));
+const infoByHandle = new Map(); // 채널 이름·분야 말고 유튜브에서 받아 온 정보(아바타·소개)
 const overrides = JSON.parse(await readFile('overrides.json', 'utf8'));
 const prior = await loadPrior();
 const priorById = new Map(prior.videos.map((v) => [v.id, v]));
@@ -162,7 +188,9 @@ const seenIds = new Set();
 let channelFailures = 0;
 for (const ch of channels) {
   try {
-    const c = await yt('channels', { part: 'contentDetails', forHandle: ch.handle });
+    const c = await yt('channels', { part: 'contentDetails,snippet', forHandle: ch.handle });
+    const sn = c.items?.[0]?.snippet;
+    if (sn) infoByHandle.set(ch.handle, { avatar: sn.thumbnails?.medium?.url ?? sn.thumbnails?.default?.url ?? '', intro: firstLine(sn.description) });
     const uploads = c.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
     if (!uploads) { console.warn(`건너뜀: ${ch.handle} (채널을 찾지 못함)`); channelFailures += 1; continue; }
     const pl = await yt('playlistItems', { part: 'contentDetails', playlistId: uploads, maxResults: '20' });
@@ -243,6 +271,23 @@ const final = videos
   })
   .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
 
+// 댓글: 영상마다 인기 댓글 3개를 매번 새로 받는다(영상 한 개에 호출 1번, 하루 한도 1만 단위 중 영상 수만큼만 쓴다).
+for (const v of final) v.comments = await topComments(v.id);
+
+// 채널 목록: channels.json(이름·분야·직접 쓴 소개)에 유튜브에서 받은 아바타·소개를 합친다. 이번에 못 받았으면 이전 결과를 쓴다.
+const priorByHandle = new Map(prior.channels.map((c) => [c.handle, c]));
+const channelList = channels.map((ch) => {
+  const got = infoByHandle.get(ch.handle);
+  const old = priorByHandle.get(ch.handle);
+  return {
+    name: ch.name,
+    handle: ch.handle,
+    category: ch.category ?? '',
+    avatar: got?.avatar || old?.avatar || '',
+    intro: ch.intro || got?.intro || old?.intro || '',
+  };
+});
+
 const counts = {};
 for (const v of final) counts[v.category] = (counts[v.category] ?? 0) + 1;
 
@@ -261,7 +306,7 @@ if (issues.length < ISSUE_MIN && final.length > 0 && prior.issues.length >= ISSU
 await mkdir(dirname(OUT), { recursive: true });
 await writeFile(
   OUT,
-  JSON.stringify({ updatedAt: new Date().toISOString(), issues, videos: final, checked: [...checked].filter((id) => seenIds.has(id)) }, null, 2),
+  JSON.stringify({ updatedAt: new Date().toISOString(), issues, channels: channelList, videos: final, checked: [...checked].filter((id) => seenIds.has(id)) }, null, 2),
 );
 console.log('이번 주 이슈:', JSON.stringify(issues));
 console.log(`후보 ${candidates.length}개 중 ${final.length}개 저장 (AI 호출 ${aiCalls}회, 보류 ${pending}개, 채널 실패 ${channelFailures}곳)`);
