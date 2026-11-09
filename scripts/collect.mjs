@@ -148,16 +148,18 @@ async function loadPrior() {
   }
 }
 
-// 채널 소개의 첫 줄만 쓴다(링크·빈 줄 제외). 앱에서 한 줄로 줄여 보여 준다.
+// 채널 소개의 첫 줄만 쓴다. 연락처·문의·홍보 줄(이메일, '문의', '오픈채팅' 등)과 링크는 건너뛰고, 줄 앞의 이모지·기호는 뗀다.
+// 앱에서 한 줄로 줄여 보여 준다.
+const SKIP_INTRO = /[\w.+-]+@[\w-]+\.[\w.]+|문의|협업|제휴|광고|오픈\s?채팅|받아\s?가|이메일|메일|카카오톡|카톡/;
 function firstLine(text) {
   const line = String(text ?? '')
     .split(/\r?\n/)
-    .map((l) => l.replace(/https?:\/\/\S+/g, '').replace(/\s+/g, ' ').trim())
-    .find((l) => l.length >= 6); // 너무 짧은 줄('광고' 같은)은 소개로 보지 않는다
+    .map((l) => l.replace(/https?:\/\/\S+/g, '').replace(/^[^\p{L}\p{N}]+/u, '').replace(/\s+/g, ' ').trim())
+    .find((l) => l.length >= 6 && !SKIP_INTRO.test(l)); // 너무 짧은 줄('광고' 같은)과 연락처·홍보 줄은 소개로 보지 않는다
   return (line ?? '').slice(0, 80);
 }
 
-// 유튜브 인기 댓글(관련도순) 최대 3개. 작성자 이름은 저장하지 않는다. 링크가 들어간 댓글, 너무 짧은 댓글은 뺀다.
+// 유튜브 인기 댓글(관련도순) 최대 3개. 작성자 이름은 저장하지 않는다. 링크·주소가 들어간 댓글, 너무 짧은 댓글은 뺀다.
 // 댓글을 막아 둔 영상은 오류가 나므로 빈 목록으로 둔다. 댓글은 시간이 지나면 바뀌므로 매번 새로 받는다(유튜브 정책: 저장한 API 데이터는 주기적으로 갱신).
 async function topComments(id) {
   try {
@@ -166,7 +168,7 @@ async function topComments(id) {
       .map((i) => i.snippet?.topLevelComment?.snippet)
       .filter(Boolean)
       .map((c) => ({ text: String(c.textDisplay ?? '').replace(/\s+/g, ' ').trim().slice(0, 200), likeCount: c.likeCount ?? 0 }))
-      .filter((c) => c.text.length >= 5 && !/https?:\/\/|www\./i.test(c.text))
+      .filter((c) => c.text.length >= 5 && !/https?:\/\/|www\.|\b[a-z0-9-]+\.[a-z]{2,}\b/i.test(c.text)) // 링크·주소(bit.ly/... 같은 줄임 주소 포함)가 든 댓글은 뺀다
       .slice(0, 3);
   } catch {
     return [];
