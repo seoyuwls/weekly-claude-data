@@ -50,19 +50,19 @@ const RULES = `너는 클로드(Anthropic Claude)를 배우는 사람을 위한 
 - beginner: 설치·가입·기본 화면부터 설명하고 사전 지식 없이 따라 할 수 있을 때만 true. 서버·터미널 설정, 도구 비교, 심화 개념, 자동화 구축은 false. 제목·설명에 처음, 기초, 입문, 왕초보, 따라하기가 있으면 참고만 하고 내용으로 판단해.
 - summary: 35자 이내 해요체 한 문장, 마침표 없이. 이 영상을 보면 무엇을 할 수 있는지 중심. 과장 표현(완벽, 끝판왕, 미친 등)과 제목의 자극적 표현은 옮기지 마. 예: 클로드 코드를 설치하고 첫 웹페이지를 만들어요`;
 
-async function gemini(parts, attempt = 0) {
+async function gemini(parts, schema = SCHEMA, attempt = 0) {
   const res = await fetch(`${GM}/models/${MODEL}:generateContent`, {
     method: 'POST',
     headers: { 'x-goog-api-key': GM_KEY, 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{ role: 'user', parts }],
-      generationConfig: { responseMimeType: 'application/json', responseSchema: SCHEMA, temperature: 0.2 },
+      generationConfig: { responseMimeType: 'application/json', responseSchema: schema, temperature: 0.2 },
     }),
   });
   // 한도 초과(429)나 일시적 서버 오류(500·503)는 간격을 늘려 다시 시도한다.
   if ([429, 500, 503].includes(res.status) && attempt < 3) {
     await sleep(10000 * 2 ** attempt);
-    return gemini(parts, attempt + 1);
+    return gemini(parts, schema, attempt + 1);
   }
   if (!res.ok) {
     const err = new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 200)}`);
@@ -93,14 +93,50 @@ async function classify(v) {
   }
 }
 
+// 이번 주 영상들을 보고 "이번 주 클로드" 카드에 보여 줄 이슈를 3~4개 뽑는다.
+// 영상 목록에 없는 소식은 지어내지 않도록, 목록의 제목·요약만 근거로 준다.
+const ISSUE_SCHEMA = {
+  type: 'OBJECT',
+  properties: { issues: { type: 'ARRAY', items: { type: 'STRING' } } },
+  required: ['issues'],
+};
+const ISSUE_MIN = 1; // 카드는 숨기지 않으므로 하나라도 있으면 보여 준다
+const ISSUE_MAX = 4;
+// 카드의 접힌 줄에서 글자가 들어가는 칸은 약 147px(16px 글자)이라 한글 약 9자까지 들어간다.
+// 글자 수가 아니라 폭으로 잰다(한글 1, 공백 0.3, 영문 대문자 0.7, 영문 소문자·숫자 0.55, 그 밖 0.5).
+const ISSUE_MAX_WIDTH = 9.2;
+const visualWidth = (s) => [...s].reduce((w, ch) => w + (/[가-힣ㄱ-ㅎㅏ-ㅣ一-龥]/.test(ch) ? 1 : ch === ' ' ? 0.3 : /[A-Z]/.test(ch) ? 0.7 : /[a-z0-9]/.test(ch) ? 0.55 : 0.5), 0);
+const ISSUE_RULES = `아래는 최근 일주일 동안 올라온 클로드(Anthropic Claude) 강의 영상 목록이야. 여러 영상이 공통으로 다룬 주제를 골라 "이번 주 클로드" 이슈 ${ISSUE_MIN}~${ISSUE_MAX}개를 JSON으로만 답해.
+- 목록에 없는 소식이나 사실은 절대 쓰지 마. 목록의 제목·요약에서 확인되는 것만 써.
+- 각 이슈는 한글 9자 안팎(공백 포함 10자 이내)의 한 줄, 핵심만, 명사형으로 끝내. 예: 클로드 코드 입문 / 피그마 연동 활용 / 코워크 업무 자동화
+- 문장 부호, 이모지, 따옴표, 과장 표현(최초, 충격, 대박, 완벽 등)은 쓰지 마.
+- 채널 이름이나 사람 이름은 넣지 마.
+- 한 영상에만 나온 주제는 빼. 같은 주제를 두 번 쓰지 마. 가장 많은 영상이 다룬 주제부터 적어.
+- 이슈가 ${ISSUE_MIN}개를 채울 만큼 공통 주제가 없으면 있는 만큼만 적어.`;
+
+async function makeIssues(videos) {
+  if (videos.length < 1) return [];
+  const list = videos.map((v) => `- [${v.category}] ${v.title} / ${v.summary}`).join('\n');
+  const r = await gemini([{ text: `${ISSUE_RULES}\n\n${list}` }], ISSUE_SCHEMA);
+  const seen = new Set();
+  const issues = [];
+  for (const raw of r.issues ?? []) {
+    const s = String(raw).trim().replace(/[.。!?"'“”‘’]+/g, '');
+    if (!s || visualWidth(s) > ISSUE_MAX_WIDTH || seen.has(s)) continue;
+    seen.add(s);
+    issues.push(s);
+  }
+  return issues.slice(0, ISSUE_MAX);
+}
+
 async function loadPrior() {
   try {
     const res = await fetch(PRIOR_URL);
-    if (!res.ok) return { videos: [], checked: [] };
+    if (!res.ok) return { videos: [], checked: [], issues: [] };
     const j = await res.json();
-    return { videos: j.videos ?? [], checked: j.checked ?? [] };
+    return { videos: j.videos ?? [], checked: j.checked ?? [], issues: j.issues ?? [] };
   } catch {
-    return { videos: [], checked: [] };
+    return { videos: [], checked: [], issues: [] };
   }
 }
 
@@ -202,10 +238,23 @@ const final = videos
 const counts = {};
 for (const v of final) counts[v.category] = (counts[v.category] ?? 0) + 1;
 
+// 5) 이번 주 이슈. 실패하거나 하나도 못 뽑으면 이전 결과를 그대로 쓰고, 그것도 없으면 비운다(앱은 비어 있어도 카드를 보여 준다).
+let issues = [];
+try {
+  issues = await makeIssues(final);
+} catch (e) {
+  console.warn(`이슈 생성 실패, 이전 결과 사용: ${e.message}`);
+}
+if (issues.length < ISSUE_MIN) {
+  console.warn(`이슈 ${issues.length}개라서 이전 결과(${prior.issues.length}개)로 대체해요.`);
+  issues = prior.issues.length >= ISSUE_MIN ? prior.issues : [];
+}
+
 await mkdir(dirname(OUT), { recursive: true });
 await writeFile(
   OUT,
-  JSON.stringify({ updatedAt: new Date().toISOString(), videos: final, checked: [...checked].filter((id) => seenIds.has(id)) }, null, 2),
+  JSON.stringify({ updatedAt: new Date().toISOString(), issues, videos: final, checked: [...checked].filter((id) => seenIds.has(id)) }, null, 2),
 );
+console.log('이번 주 이슈:', JSON.stringify(issues));
 console.log(`후보 ${candidates.length}개 중 ${final.length}개 저장 (AI 호출 ${aiCalls}회, 보류 ${pending}개, 채널 실패 ${channelFailures}곳)`);
 console.log('분야별:', JSON.stringify(counts), '/ 입문:', final.filter((v) => v.beginner).length);
