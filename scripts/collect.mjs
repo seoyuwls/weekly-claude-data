@@ -93,7 +93,7 @@ async function classify(v) {
   }
 }
 
-// 이번 주 영상들을 보고 "이번 주 클로드" 카드에 보여 줄 이슈를 3~4개 뽑는다.
+// 최근 7일 영상들을 보고 "이번 주 클로드" 카드에 보여 줄 이슈를 1~3개 뽑는다.
 // 영상 목록에 없는 소식은 지어내지 않도록, 목록의 제목·요약만 근거로 준다.
 const ISSUE_SCHEMA = {
   type: 'OBJECT',
@@ -101,7 +101,7 @@ const ISSUE_SCHEMA = {
   required: ['issues'],
 };
 const ISSUE_MIN = 1; // 카드는 숨기지 않으므로 하나라도 있으면 보여 준다
-const ISSUE_MAX = 4;
+const ISSUE_MAX = 3;
 // 카드의 접힌 줄에서 글자가 들어가는 칸은 약 147px(16px 글자)이라 한글 약 9자까지 들어간다.
 // 글자 수가 아니라 폭으로 잰다(한글 1, 공백 0.3, 영문 대문자 0.7, 영문 소문자·숫자 0.55, 그 밖 0.5).
 const ISSUE_MAX_WIDTH = 9.2;
@@ -111,22 +111,30 @@ const ISSUE_RULES = `아래는 최근 일주일 동안 올라온 클로드(Anthr
 - 각 이슈는 한글 9자 안팎(공백 포함 10자 이내)의 한 줄, 핵심만, 명사형으로 끝내. 예: 클로드 코드 입문 / 피그마 연동 활용 / 코워크 업무 자동화
 - 문장 부호, 이모지, 따옴표, 과장 표현(최초, 충격, 대박, 완벽 등)은 쓰지 마.
 - 채널 이름이나 사람 이름은 넣지 마.
-- 한 영상에만 나온 주제는 빼. 같은 주제를 두 번 쓰지 마. 가장 많은 영상이 다룬 주제부터 적어.
-- 이슈가 ${ISSUE_MIN}개를 채울 만큼 공통 주제가 없으면 있는 만큼만 적어.`;
+- 여러 영상이 공통으로 다룬 주제를 먼저, 가장 많은 영상이 다룬 순서로 적어. 같은 주제를 두 번 쓰지 마.
+- 공통 주제가 부족하면 눈에 띄는 영상의 주제로 채워도 되지만, 영상이 하나라도 있으면 이슈는 최소 ${ISSUE_MIN}개는 꼭 적어.`;
 
 async function makeIssues(videos) {
   if (videos.length < 1) return [];
   const list = videos.map((v) => `- [${v.category}] ${v.title} / ${v.summary}`).join('\n');
-  const r = await gemini([{ text: `${ISSUE_RULES}\n\n${list}` }], ISSUE_SCHEMA);
-  const seen = new Set();
-  const issues = [];
-  for (const raw of r.issues ?? []) {
-    const s = String(raw).trim().replace(/[.。!?"'“”‘’]+/g, '');
-    if (!s || visualWidth(s) > ISSUE_MAX_WIDTH || seen.has(s)) continue;
-    seen.add(s);
-    issues.push(s);
+  const pick = (raw) => {
+    const seen = new Set();
+    const picked = [];
+    for (const item of raw ?? []) {
+      const s = String(item).trim().replace(/[.。!?"'“”‘’]+/g, '');
+      if (!s || visualWidth(s) > ISSUE_MAX_WIDTH || seen.has(s)) continue;
+      seen.add(s);
+      picked.push(s);
+    }
+    return picked.slice(0, ISSUE_MAX);
+  };
+  let issues = pick((await gemini([{ text: `${ISSUE_RULES}\n\n${list}` }], ISSUE_SCHEMA)).issues);
+  if (issues.length === 0) {
+    // 전부 너무 길어서 걸러졌다면 더 짧게 써 달라고 한 번만 다시 요청한다.
+    console.warn('이슈가 모두 길이 기준을 넘어 한 번 더 요청해요.');
+    issues = pick((await gemini([{ text: `${ISSUE_RULES}\n- 방금은 모두 너무 길었어. 이번에는 한글 8자 이내로 아주 짧게 써.\n\n${list}` }], ISSUE_SCHEMA)).issues);
   }
-  return issues.slice(0, ISSUE_MAX);
+  return issues;
 }
 
 async function loadPrior() {
@@ -238,16 +246,16 @@ const final = videos
 const counts = {};
 for (const v of final) counts[v.category] = (counts[v.category] ?? 0) + 1;
 
-// 5) 이번 주 이슈. 실패하거나 하나도 못 뽑으면 이전 결과를 그대로 쓰고, 그것도 없으면 비운다(앱은 비어 있어도 카드를 보여 준다).
+// 5) 이번 주 이슈. 실패하거나 하나도 못 뽑으면 이전 결과를 그대로 쓰고, 그것도 없으면 비운다(앱은 issues가 비어 있으면 '오늘은 조용해요...'를 보여 준다).
 let issues = [];
 try {
   issues = await makeIssues(final);
 } catch (e) {
-  console.warn(`이슈 생성 실패, 이전 결과 사용: ${e.message}`);
+  console.warn(`이슈 생성 실패: ${e.message}`);
 }
-if (issues.length < ISSUE_MIN) {
-  console.warn(`이슈 ${issues.length}개라서 이전 결과(${prior.issues.length}개)로 대체해요.`);
-  issues = prior.issues.length >= ISSUE_MIN ? prior.issues : [];
+if (issues.length < ISSUE_MIN && final.length > 0 && prior.issues.length >= ISSUE_MIN) {
+  console.warn(`이슈 ${issues.length}개라서 이전 결과(${prior.issues.length}개)를 써요.`);
+  issues = prior.issues;
 }
 
 await mkdir(dirname(OUT), { recursive: true });
