@@ -15,11 +15,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  collect-and-deploy:
+  # 수집하고 결과물을 올리는 작업. 배포는 이 작업이 끝난 뒤 따로 시작한다.
+  collect:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -34,5 +32,13 @@ jobs:
       - uses: actions/upload-pages-artifact@v3
         with:
           path: public
+
+  deploy:
+    needs: collect
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - id: deployment
         uses: actions/deploy-pages@v4
